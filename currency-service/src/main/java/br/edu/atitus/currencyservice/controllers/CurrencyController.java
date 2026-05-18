@@ -1,53 +1,69 @@
 package br.edu.atitus.currencyservice.controllers;
 
-import br.edu.atitus.currencyservice.dtos.CurrencyDTO;
+import br.edu.atitus.currencyservice.clients.BCBClient;
+import br.edu.atitus.currencyservice.clients.BCBResponse;
 import br.edu.atitus.currencyservice.entities.CurrencyEntity;
 import br.edu.atitus.currencyservice.repositories.CurrencyRepository;
-import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.cache.CacheManager;
+import org.springframework.core.env.Environment;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
-@RequestMapping("currency")
+@RequestMapping("/currency-service")
 public class CurrencyController {
 
-    @Value("${server.port}")
-    private String port;
+    @Autowired
+    private Environment environment;
 
-    @Value("${convert.sleep:0}")
-    private int sleep;
+    @Autowired
+    private CurrencyRepository currencyRepository;
 
-    private final CurrencyRepository repository;
+    @Autowired
+    private BCBClient bcbClient;
 
-    public CurrencyController(CurrencyRepository repository) {
-        this.repository = repository;
-    }
+    @Autowired
+    private CacheManager cacheManager;
 
-    @GetMapping("/convert")
-    public ResponseEntity<CurrencyDTO> getConvert(
-            @RequestParam String source,
-            @RequestParam String target) throws Exception {
+    @GetMapping("/{currency}")
+    public ResponseEntity<CurrencyEntity> getCurrency(@PathVariable String currency) {
 
-        Thread.sleep(sleep);
+        var currencyEntity = currencyRepository.findByCurrency(currency)
+                .orElseThrow(() -> new RuntimeException("Currency not found"));
 
-        source = source.toUpperCase();
-        target = target.toUpperCase();
+        String port = environment.getProperty("local.server.port");
+        String dataFixaCotacao = "10-25-2023"; // Data útil fixa
+        String nameCache = "bcb-currency";
+        Double cotacaoBcb = null;
 
-        CurrencyEntity currency = repository.findBySourceCurrencyAndTargetCurrency(source, target)
-                .orElseThrow(() -> new Exception("Currency not found"));
+        // Tenta buscar do Cache
+        var cacheInfo = cacheManager.getCache(nameCache).get(currency);
+        if (cacheInfo != null) {
+            cotacaoBcb = (Double) cacheInfo.get();
+            port += " - BCB in cache";
+        } else {
+            // Busca da API do BCB via Feign
+            BCBResponse response = bcbClient.getCotacaoBcb(currency, dataFixaCotacao);
 
-        String environment = "Currency-service running on port: " + port;
+            // Verifica se a resposta não é nula (Se for nula, é porque caiu no Fallback)
+            if (response != null && response.getValue() != null && !response.getValue().isEmpty()) {
+                cotacaoBcb = response.getValue().get(0).getCotacaoVenda();
+                cacheManager.getCache(nameCache).put(currency, cotacaoBcb); // Salva no cache
+            } else {
+                port += " - BCB Fallback"; // O BCB falhou, usaremos o valor original do BD local
+            }
+        }
 
-        CurrencyDTO dto = new CurrencyDTO(currency.getSourceCurrency(),
-                currency.getTargetCurrency(),
-                currency.getConversionRate(),
-                environment);
+        // Se conseguiu pegar a cotação do BCB, atualiza o multiplicador.
+        if (cotacaoBcb != null) {
+            currencyEntity.setConversionMultiplier(cotacaoBcb);
+        }
 
-        return ResponseEntity.ok(dto);
-        //return ResponseEntity.badRequest().body(dto);
-        //return ResponseEntity.internalServerError().body(dto);
+        currencyEntity.setEnvironment(port);
+        return ResponseEntity.ok(currencyEntity);
     }
 }
