@@ -36,29 +36,25 @@ public class CurrencyController {
                 .orElseThrow(() -> new RuntimeException("Currency not found"));
 
         String port = environment.getProperty("local.server.port");
-        String dataFixaCotacao = "10-25-2023"; // Data útil fixa
+        String dataFixaCotacao = "05-14-2026"; // Data útil fixa
         String nameCache = "bcb-currency";
         Double cotacaoBcb = null;
 
-        // Tenta buscar do Cache
         var cacheInfo = cacheManager.getCache(nameCache).get(currency);
         if (cacheInfo != null) {
             cotacaoBcb = (Double) cacheInfo.get();
             port += " - BCB in cache";
         } else {
-            // Busca da API do BCB via Feign
             BCBResponse response = bcbClient.getCotacaoBcb(currency, dataFixaCotacao);
 
-            // Verifica se a resposta não é nula (Se for nula, é porque caiu no Fallback)
             if (response != null && response.getValue() != null && !response.getValue().isEmpty()) {
                 cotacaoBcb = response.getValue().get(0).getCotacaoVenda();
                 cacheManager.getCache(nameCache).put(currency, cotacaoBcb); // Salva no cache
             } else {
-                port += " - BCB Fallback"; // O BCB falhou, usaremos o valor original do BD local
+                port += " - BCB Fallback";
             }
         }
 
-        // Se conseguiu pegar a cotação do BCB, atualiza o multiplicador.
         if (cotacaoBcb != null) {
             currencyEntity.setConversionMultiplier(cotacaoBcb);
         }
